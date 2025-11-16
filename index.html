@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cybernetic AR HUD — Complete (with Hand Gestures)</title>
+
+  <!-- MediaPipe (Hands + Camera utilities) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <style>
+    /* Reset */
+    *{box-sizing:border-box;margin:0;padding:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    html,body,#app{height:100%}
+    body{background:#000;color:#0ff;overflow:hidden}
+
+    /* Video background (webcam) */
+    #videoWrap{position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center}
+    video#cam{width:100%;height:100%;object-fit:cover;filter:brightness(.65) contrast(1.05)}
+
+    /* HUD overlay */
+    .hud{position:fixed;inset:0;pointer-events:none}
+
+    /* Crosshair */
+    .crosshair{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:120px;height:120px;pointer-events:none}
+    .crosshair .ring{position:absolute;inset:0;border-radius:50%;border:2px solid rgba(0,255,200,0.18);box-shadow:0 0 20px rgba(0,255,200,0.05) inset}
+    .crosshair .reticle{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:6px;height:6px;background:linear-gradient(180deg,#00ffd0,#008b6b);border-radius:50%;box-shadow:0 0 10px rgba(0,255,200,0.8)}
+    .crosshair .tick{position:absolute;left:50%;top:50%;transform-origin:center;transform:translate(-50%,-50%);width:2px;height:22px;background:rgba(0,255,200,0.25)}
+    .crosshair .tick.t1{transform:translate(-50%,-50%) rotate(0deg) translateY(-48px)}
+    .crosshair .tick.t2{transform:translate(-50%,-50%) rotate(90deg) translateX(-48px)}
+    .crosshair .tick.t3{transform:translate(-50%,-50%) rotate(180deg) translateY(48px)}
+    .crosshair .tick.t4{transform:translate(-50%,-50%) rotate(270deg) translateX(48px)}
+
+    /* Top HUD bars */
+    .topbar{position:absolute;left:50%;transform:translateX(-50%);top:18px;display:flex;gap:14px;align-items:center;pointer-events:none}
+    .chip{background:linear-gradient(90deg,rgba(0,255,200,0.06),rgba(0,255,200,0.02));border:1px solid rgba(0,255,200,0.08);padding:8px 14px;border-radius:999px;font-weight:600;color:#bff;backdrop-filter:blur(6px)}
+
+    /* Right panel (info) */
+    .rightPanel{position:absolute;right:18px;top:70px;width:320px;max-width:40vw;padding:12px;border-radius:10px;border:1px solid rgba(0,255,200,0.06);background:linear-gradient(180deg,rgba(0,0,0,0.22),rgba(0,0,0,0.05));pointer-events:auto}
+    .panelTitle{font-size:14px;color:#9df8e6;margin-bottom:8px}
+    .row{display:flex;justify-content:space-between;gap:8px;font-size:13px;color:#c9fff0}
+    .progress{height:8px;background:rgba(0,255,200,0.06);border-radius:999px;overflow:hidden;margin-top:6px}
+    .progress > i{display:block;height:100%;width:70%;background:linear-gradient(90deg,#00ffd0,#00997a)}
+
+    /* Radar */
+    .radar{position:absolute;left:18px;bottom:18px;width:220px;height:220px;border-radius:50%;border:1px solid rgba(0,255,200,0.06);background:radial-gradient(ellipse at center, rgba(0,255,200,0.02), rgba(0,0,0,0.2));pointer-events:none}
+    .radar .sweep{position:absolute;inset:0;border-radius:50%;clip-path:polygon(50% 50%, 100% 0, 100% 100%);opacity:0.12;animation:spin 3s linear infinite;transform-origin:center}
+    @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    .radar .dot{position:absolute;width:8px;height:8px;border-radius:50%;background:linear-gradient(180deg,#00ffe1,#006b4f);box-shadow:0 0 10px rgba(0,255,200,0.8)}
+
+    /* Target boxes */
+    .target{position:absolute;border:2px dashed rgba(0,255,200,0.5);padding:6px;border-radius:6px;pointer-events:none;transform-origin:center;transition:transform .12s linear}
+    .target.lock{border-style:solid;box-shadow:0 0 18px rgba(0,255,200,0.35)}
+
+    /* Scanlines & noise */
+    .scanlines{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(rgba(0,255,200,0.02) 1px, transparent 1px);background-size:100% 3px;mix-blend-mode:overlay;opacity:0.45}
+    .noise{position:absolute;inset:0;pointer-events:none;background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><filter id="n"><feTurbulence baseFrequency="0.9" seed="1" numOctaves="1"/><feColorMatrix type="saturate" values="0"/></filter><rect filter="url(%23n)" width="100%" height="100%" fill="black"/></svg>');opacity:0.03}
+
+    /* Footer hints */
+    .footer{position:absolute;left:50%;transform:translateX(-50%);bottom:18px;color:#7ffedc;font-size:12px;opacity:0.9;pointer-events:none}
+
+    /* Controls UI */
+    .controls{position:fixed;left:18px;top:18px;padding:8px;border-radius:8px;background:rgba(0,0,0,0.5);backdrop-filter:blur(6px);border:1px solid rgba(0,255,200,0.05);pointer-events:auto}
+    .controls button{display:block;margin:4px;padding:6px 10px;border-radius:6px;border:1px solid rgba(0,255,200,0.08);background:transparent;color:#bff;font-weight:600}
+    .controls small{display:block;color:#8ff;font-size:11px;margin-top:6px}
+
+    /* Responsive tweaks */
+    @media (max-width:600px){.rightPanel{display:none}.radar{width:160px;height:160px}}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="videoWrap">
+      <video id="cam" autoplay muted playsinline></video>
+    </div>
+
+    <div class="hud">
+      <div class="scanlines"></div>
+      <div class="noise"></div>
+
+      <div class="topbar">
+        <div class="chip" id="timeChip">--:--:--</div>
+        <div class="chip" id="statusChip">STATUS: ONLINE</div>
+        <div class="chip" id="signalChip">SIG: 4</div>
+      </div>
+
+      <div class="crosshair">
+        <div class="ring"></div>
+        <div class="reticle"></div>
+        <div class="tick t1"></div>
+        <div class="tick t2"></div>
+        <div class="tick t3"></div>
+        <div class="tick t4"></div>
+      </div>
+
+      <div class="rightPanel" id="rightPanel">
+        <div class="panelTitle">TARGET INFO</div>
+        <div class="row"><div>Locked</div><div id="lockedState">No</div></div>
+        <div class="row"><div>Distance</div><div id="distance">— m</div></div>
+        <div style="margin-top:10px">
+          <div class="panelTitle">SYSTEMS</div>
+          <div class="row"><div>CPU</div><div>28%</div></div>
+          <div class="row" style="margin-top:6px"><div>Battery</div><div>87%</div></div>
+          <div class="progress"><i id="batteryBar"></i></div>
+        </div>
+      </div>
+
+      <div class="radar" id="radar">
+        <div class="sweep"></div>
+      </div>
+
+      <div class="footer">Use hand gestures: <b>Open palm</b> spawn • <b>Pinch</b> lock • <b>Fist</b> toggle cam • Quick swipe clear</div>
+
+    </div>
+
+    <div class="controls" id="controls">
+      <button id="btnToggleCam">Toggle Camera (C)</button>
+      <button id="btnSpawn">Spawn Target (W)</button>
+      <button id="btnClear">Clear Targets</button>
+      <small>Tip: run on HTTPS or localhost to allow webcam. Use decent lighting for gestures.</small>
+    </div>
+  </div>
+
+  <!-- HUD core script -->
+  <script>
+    // Simple AR HUD prototype (functions are global so gesture script can call them)
+    const video = document.getElementById('cam');
+    const btnToggle = document.getElementById('btnToggleCam');
+    const btnSpawn = document.getElementById('btnSpawn');
+    const btnClear = document.getElementById('btnClear');
+    const radar = document.getElementById('radar');
+    const lockedState = document.getElementById('lockedState');
+    const distanceEl = document.getElementById('distance');
+    const batteryBar = document.getElementById('batteryBar');
+    const timeChip = document.getElementById('timeChip');
+
+    window.stream = null;
+    window.targets = [];
+    window.lock = null;
+    window.camOn = false;
+
+    // request webcam (HTTPS or localhost required)
+    async function startCamera(){
+      if (camOn) return;
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+        video.srcObject = stream;
+        camOn = true;
+        document.getElementById('statusChip').textContent = 'STATUS: CAMERA';
+      }catch(e){
+        console.warn('Camera blocked or not available', e);
+        document.getElementById('statusChip').textContent = 'STATUS: NO CAMERA';
+      }
+    }
+    window.startCamera = startCamera;
+
+    function stopCamera(){
+      if (!stream) return;
+      stream.getTracks().forEach(t=>t.stop());
+      video.srcObject = null;
+      stream = null; camOn = false;
+      document.getElementById('statusChip').textContent = 'STATUS: OFF';
+    }
+    window.stopCamera = stopCamera;
+
+    btnToggle.addEventListener('click', ()=>{ camOn ? stopCamera() : startCamera(); });
+    document.addEventListener('keydown', (e)=>{
+      if (e.key.toLowerCase()==='c') camOn ? stopCamera() : startCamera();
+      if (e.key.toLowerCase()==='w') spawnTarget();
+    });
+
+    btnSpawn.addEventListener('click', spawnTarget);
+    btnClear.addEventListener('click', clearTargets);
+
+    function spawnTarget(){
+      // create fake target at random screen position
+      const t = document.createElement('div');
+      t.className = 'target';
+      // choose viewport-relative positions using vw/vh for responsiveness
+      const left = 2 + Math.random()*86; // %
+      const top = 6 + Math.random()*74; // %
+      t.style.left = left + 'vw';
+      t.style.top = top + 'vh';
+      t.style.width = 120 + 'px';
+      t.style.height = 70 + 'px';
+      const range = Math.floor(Math.random()*300)+10;
+      t.innerHTML = `<div style='font-size:12px;color:#bff;margin-bottom:4px'>UNKNOWN
+        <div style='font-size:11px;color:#9df8e6'>R:${range}m</div></div>`;
+      document.body.appendChild(t);
+      targets.push(t);
+
+      // add click to lock
+      t.addEventListener('click', ()=>{
+        lockTarget(t);
+      });
+
+      // also add a subtle entrance
+      t.animate([{transform:'scale(.8)'},{transform:'scale(1)'}],{duration:220,fill:'forwards',easing:'cubic-bezier(.2,.9,.2,1)'});
+
+      updateRadar();
+      return t;
+    }
+    window.spawnTarget = spawnTarget;
+
+    function clearTargets(){
+      targets.forEach(t=>t.remove()); targets = []; unlock(); updateRadar();
+    }
+    window.clearTargets = clearTargets;
+
+    function lockTarget(el){
+      // unlock previous
+      if (lock) lock.classList.remove('lock');
+      lock = el; lock.classList.add('lock');
+      lockedState.textContent = 'YES';
+      // fake distance calculation from center
+      const rect = el.getBoundingClientRect();
+      const cx = window.innerWidth/2, cy = window.innerHeight/2;
+      const dx = rect.left + rect.width/2 - cx;
+      const dy = rect.top + rect.height/2 - cy;
+      const dist = Math.round(Math.sqrt(dx*dx+dy*dy)/6); // arbitrary meters scaling
+      distanceEl.textContent = dist + ' m';
+      // animate a pulse
+      const pulse = document.createElement('div');
+      pulse.style.position='absolute'; pulse.style.left = (rect.left + rect.width/2 - 80) + 'px';
+      pulse.style.top = (rect.top + rect.height/2 - 80) + 'px';
+      pulse.style.width='160px'; pulse.style.height='160px'; pulse.style.borderRadius='50%';
+      pulse.style.border='2px solid rgba(0,255,200,0.08)'; pulse.style.pointerEvents='none'; document.body.appendChild(pulse);
+      pulse.animate([{transform:'scale(.2)', opacity:1},{transform:'scale(1.8)',opacity:0}],{duration:900,fill:'forwards'}).onfinish = ()=> pulse.remove();
+    }
+    window.lockTarget = lockTarget;
+
+    function unlock(){ if(lock) lock.classList.remove('lock'); lock=null; lockedState.textContent='No'; distanceEl.textContent='— m'; }
+    window.unlock = unlock;
+
+    // Radar: spawn dots for targets
+    function updateRadar(){
+      // clear previous dots
+      [...radar.querySelectorAll('.dot')].forEach(d=>d.remove());
+      targets.forEach(t=>{
+        const r = t.getBoundingClientRect();
+        const cx = window.innerWidth/2, cy = window.innerHeight/2;
+        const dx = (r.left + r.width/2) - cx;
+        const dy = (r.top + r.height/2) - cy;
+        // normalize to radar size
+        const maxRange = Math.max(window.innerWidth, window.innerHeight)/2;
+        const rx = (dx / maxRange) * (radar.clientWidth/2);
+        const ry = (dy / maxRange) * (radar.clientHeight/2);
+        const dot = document.createElement('div'); dot.className='dot';
+        dot.style.left = (radar.clientWidth/2 + rx - 4) + 'px';
+        dot.style.top = (radar.clientHeight/2 + ry - 4) + 'px';
+        radar.appendChild(dot);
+      });
+    }
+
+    // Simulated battery drain and time update
+    let battery = 87;
+    setInterval(()=>{
+      battery = Math.max(8, battery - Math.random()*0.2);
+      const pct = Math.round(battery);
+      batteryBar.style.width = pct + '%';
+      if (pct<25) batteryBar.style.background = 'linear-gradient(90deg,#ff7a7a,#ff3b3b)';
+    },2000);
+
+    function updateTime(){
+      const d = new Date();
+      timeChip.textContent = d.toLocaleTimeString();
+    }
+    setInterval(updateTime, 500);
+    updateTime();
+
+    // Auto-update radar periodically
+    setInterval(updateRadar, 300);
+
+    // click-to-lock anywhere? also add drag ability for targets
+    document.addEventListener('click', (e)=>{
+      // ignore clicks on controls
+      const isControl = e.target.closest('.controls');
+      if (isControl) return;
+      // if clicked empty space, unlock
+      const isTarget = e.target.closest('.target');
+      if (!isTarget) unlock();
+    });
+
+    // make targets draggable for fun
+    let dragEl = null, dragOffset = {x:0,y:0};
+    document.addEventListener('pointerdown',(e)=>{
+      const t = e.target.closest('.target');
+      if (!t) return;
+      dragEl = t; dragEl.setPointerCapture(e.pointerId);
+      const rect = t.getBoundingClientRect(); dragOffset.x = e.clientX - rect.left; dragOffset.y = e.clientY - rect.top;
+      dragEl.style.transition='none'
+    });
+    document.addEventListener('pointermove',(e)=>{
+      if (!dragEl) return;
+      const left = e.clientX - dragOffset.x; const top = e.clientY - dragOffset.y;
+      dragEl.style.left = left + 'px'; dragEl.style.top = top + 'px'; updateRadar();
+    });
+    document.addEventListener('pointerup',(e)=>{ if (dragEl){ dragEl.style.transition='transform .12s linear'; dragEl.releasePointerCapture(e.pointerId); dragEl=null; }});
+
+    // Startup: try to start camera automatically if allowed
+    startCamera().catch(()=>{});
+
+    // small helper: spawn initial targets for demo
+    for(let i=0;i<3;i++) spawnTarget();
+
+    // Info: run on https or localhost for camera access
+  </script>
+
+  <!-- Hand gesture controller (MediaPipe Hands) -->
+  <script>
+  (async ()=>{
+
+    if (!window.Hands || !window.Camera) {
+      console.warn('MediaPipe Hands or Camera utilities not loaded.');
+      return;
+    }
+
+    const wristHistory = [];
+    const HISTORY_MAX = 6;
+
+    let lastSpawn = 0, lastToggle = 0, lastClick = 0, lastClear = 0;
+    const COOLDOWN = 700; // ms
+
+    function dist(a,b){
+      const dx = a.x - b.x, dy = a.y - b.y;
+      return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    const TIP = {thumb:4, index:8, middle:12, ring:16, pinky:20};
+    const PIP = {index:6, middle:10, ring:14, pinky:18};
+
+    function countFingersUp(landmarks){
+      if(!landmarks) return 0;
+      let count = 0;
+      if (landmarks[TIP.index].y < landmarks[PIP.index].y) count++;
+      if (landmarks[TIP.middle].y < landmarks[PIP.middle].y) count++;
+      if (landmarks[TIP.ring].y < landmarks[PIP.ring].y) count++;
+      if (landmarks[TIP.pinky].y < landmarks[PIP.pinky].y) count++;
+      const thumbIsOpen = Math.abs(landmarks[TIP.thumb].x - landmarks[3].x) > 0.03;
+      if (thumbIsOpen) count++;
+      return count;
+    }
+
+    function isPinch(landmarks){
+      if(!landmarks) return false;
+      const d = dist(landmarks[TIP.thumb], landmarks[TIP.index]);
+      return d < 0.06;
+    }
+
+    function isFist(landmarks){
+      if(!landmarks) return false;
+      return countFingersUp(landmarks) <= 1;
+    }
+
+    function isOpenPalm(landmarks){
+      if(!landmarks) return false;
+      return countFingersUp(landmarks) >= 4;
+    }
+
+    function detectSwipe(){
+      if (wristHistory.length < HISTORY_MAX) return null;
+      const xs = wristHistory.map(v=>v.x);
+      const dx = xs[xs.length-1] - xs[0];
+      const dt = wristHistory[wristHistory.length-1].t - wristHistory[0].t;
+      if (Math.abs(dx) > 0.18 && dt < 400) {
+        return dx > 0 ? 'right' : 'left';
+      }
+      return null;
+    }
+
+    function elementUnderCrosshair(){
+      const cx = window.innerWidth/2, cy = window.innerHeight/2;
+      const el = document.elementFromPoint(cx, cy);
+      return el && el.closest && el.closest('.target') ? el.closest('.target') : null;
+    }
+
+    function handleGestures(handedness, landmarks){
+      const now = Date.now();
+      const wrist = landmarks[0];
+      wristHistory.push({x: wrist.x, t: now});
+      if (wristHistory.length > HISTORY_MAX) wristHistory.shift();
+
+      if (isPinch(landmarks) && now - lastClick > COOLDOWN) {
+        lastClick = now;
+        const el = elementUnderCrosshair();
+        if (el) {
+          if (typeof lockTarget === 'function') lockTarget(el);
+          el.animate([{transform:'scale(1.05)'},{transform:'scale(1)'}],{duration:180});
+        } else {
+          if (typeof spawnTarget === 'function') spawnTarget();
+        }
+      }
+
+      if (isOpenPalm(landmarks) && now - lastSpawn > COOLDOWN) {
+        lastSpawn = now;
+        if (typeof spawnTarget === 'function') spawnTarget();
+      }
+
+      if (isFist(landmarks) && now - lastToggle > COOLDOWN) {
+        lastToggle = now;
+        if (camOn) { if (typeof stopCamera === 'function') stopCamera(); }
+        else { if (typeof startCamera === 'function') startCamera(); }
+      }
+
+      const swipe = detectSwipe();
+      if (swipe && now - lastClear > 900) {
+        lastClear = now;
+        if (typeof clearTargets === 'function') clearTargets();
+        wristHistory.length = 0;
+      }
+    }
+
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      }
+    });
+
+    hands.setOptions({
+      modelComplexity: 1,
+      maxNumHands: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults((results) => {
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const landmarks = results.multiHandLandmarks[0];
+        const handedness = (results.multiHandedness && results.multiHandedness[0]) ? results.multiHandedness[0].label : 'Unknown';
+        try { handleGestures(handedness, landmarks); } catch (e) { console.error(e); }
+      } else {
+        wristHistory.length = 0;
+      }
+    });
+
+    const videoElement = document.getElementById('cam');
+    if (!videoElement) {
+      console.warn('No video element #cam found for gestures to use.');
+      return;
+    }
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await hands.send({image: videoElement});
+      },
+      fps: 30,
+      width: 1280,
+      height: 720
+    });
+
+    const startWhenCamAvailable = () => {
+      if (camOn) {
+        try { camera.start(); } catch(e) { console.warn('Camera start failed for gestures:', e); }
+      } else {
+        const tryInterval = setInterval(()=>{
+          if (camOn) { clearInterval(tryInterval); try { camera.start(); } catch(e){console.warn(e);} }
+        }, 400);
+      }
+    };
+
+    startWhenCamAvailable();
+
+    const originalStart = window.startCamera;
+    const originalStop  = window.stopCamera;
+    if (typeof originalStart === 'function') {
+      window.startCamera = async function(...args){
+        const res = await originalStart(...args);
+        try { camera.start(); } catch(e){/* ignore */ }
+        return res;
+      };
+    }
+    if (typeof originalStop === 'function') {
+      window.stopCamera = function(...args){
+        const res = originalStop(...args);
+        try { camera.stop(); } catch(e){/* ignore */ }
+        return res;
+      };
+    }
+
+    console.log('Hand gesture controller initialized.');
+  })();
+  </script>
+</body>
+</html>
